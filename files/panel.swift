@@ -10,6 +10,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     let width: CGFloat = 340
     var window: NSPanel!
     var web: WKWebView!
+    var front = ""   // zuletzt aktive andere App (fuer "Zum Terminal" ein-/ausklappen)
 
     init(url: URL) {
         self.url = url
@@ -40,6 +41,30 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         window.contentView!.addSubview(web)
         web.load(URLRequest(url: url))
         window.orderFrontRegardless()
+
+        let me = ProcessInfo.processInfo.processIdentifier
+        if let a = NSWorkspace.shared.frontmostApplication, a.processIdentifier != me {
+            front = a.bundleURL?.path ?? ""
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { note in
+            guard let a = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  a.processIdentifier != me else { return }
+            self.front = a.bundleURL?.path ?? ""
+            self.pushFront()
+        }
+    }
+
+    // Der Seite mitteilen, welche App vor dem Klick ins Widget aktiv war.
+    func pushFront() {
+        guard let d = try? JSONSerialization.data(withJSONObject: [front]),
+              let s = String(data: d, encoding: .utf8) else { return }
+        web.evaluateJavaScript("window.huddleFront = \(s)[0];", completionHandler: nil)
+    }
+
+    func webView(_ w: WKWebView, didFinish n: WKNavigation!) {
+        pushFront()
     }
 
     // Die Seite meldet ihre Hoehe; das Fenster waechst nach unten mit.

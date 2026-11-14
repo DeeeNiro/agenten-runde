@@ -526,8 +526,11 @@ def ui_action(d):
         if s and not s.get("remote"):
             if a == "vscode":
                 open_vscode(s)
-            elif not toggle_terminal(s) and d.get("fallback"):
-                open_vscode(s)
+            else:
+                ok = (toggle_terminal(s, str(d.get("front") or "")) if IS_MAC
+                      else toggle_terminal(s))
+                if not ok and d.get("fallback"):
+                    open_vscode(s)
     elif a == "log":
         ui_log(d.get("msg"))
     return {}
@@ -753,13 +756,18 @@ if IS_WIN:
 
 elif IS_MAC:
     # A session is found by the terminal's tty (Terminal, iTerm2); other apps
-    # (VS Code, ...) are simply brought to the front.
+    # (VS Code, ...) are simply brought to the front. With argument 2 = "1" a
+    # tab that is already in front gets minimized instead (second click).
     TAB_SCRIPTS = {
         "Terminal": """on run argv
   tell application "Terminal"
     repeat with w in windows
       repeat with t in tabs of w
         if tty of t is (item 1 of argv) then
+          if (item 2 of argv) is "1" and (index of w) is 1 and (selected of t) and not (miniaturized of w) then
+            set miniaturized of w to true
+            return "min"
+          end if
           set selected of t to true
           if miniaturized of w then set miniaturized of w to false
           set index of w to 1
@@ -777,6 +785,11 @@ end run""",
       repeat with t in tabs of w
         repeat with ss in sessions of t
           if tty of ss is (item 1 of argv) then
+            if (item 2 of argv) is "1" and (id of w) is (id of current window) and (tty of current session of w) is (item 1 of argv) and not (miniaturized of w) then
+              set miniaturized of w to true
+              return "min"
+            end if
+            if miniaturized of w then set miniaturized of w to false
             select w
             select t
             select ss
@@ -791,13 +804,13 @@ end run""",
 end run""",
     }
 
-    def _focus(app, tty):
+    def _focus(app, tty, toggle=False):
         script = TAB_SCRIPTS.get(os.path.basename(app)[:-4])
         if script and tty:
             try:
-                r = subprocess.run(["/usr/bin/osascript", "-", tty], input=script,
-                                   capture_output=True, text=True, timeout=60)
-                if r.returncode == 0 and r.stdout.strip() == "ok":
+                r = subprocess.run(["/usr/bin/osascript", "-", tty, "1" if toggle else "0"],
+                                   input=script, capture_output=True, text=True, timeout=60)
+                if r.returncode == 0 and r.stdout.strip() in ("ok", "min"):
                     return
             except Exception:
                 pass
@@ -806,14 +819,19 @@ end run""",
     def track_foreground():
         pass
 
-    def focus_session(s):
+    def focus_session(s, front=""):
+        """Bring the session's terminal to the front. `front` is the app that
+        was active before the widget was clicked: if that already was this
+        terminal, the click minimizes the window again (like on Windows)."""
         with ST.lock:  # use the freshest data (the window may have arrived later)
             s = dict(ST.sessions.get(s["id"], s))
         t = s.get("termwin") or {}
         app = t.get("app") or ""
         if not (app.endswith(".app") and os.path.isdir(app)):
             return False
-        threading.Thread(target=_focus, args=(app, t.get("tty") or ""), daemon=True).start()
+        toggle = bool(front) and os.path.realpath(front) == os.path.realpath(app)
+        threading.Thread(target=_focus, args=(app, t.get("tty") or "", toggle),
+                         daemon=True).start()
         return True
 
     toggle_terminal = focus_session

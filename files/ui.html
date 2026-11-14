@@ -259,8 +259,10 @@ document.addEventListener("click", ev => {
     }
     case "commit": commitEdit(); break;
     case "dismiss": expanded.delete(sid); api({action: "dismiss", sid: sid}); break;
-    case "jump": api({action: "focus", sid: sid, fallback: true}); break;
-    case "focus": api({action: "focus", sid: sid}); break;
+    // front: the app that was active before this click (set by the native
+    // window) - lets a second click fold the terminal away again
+    case "jump": api({action: "focus", sid: sid, fallback: true, front: window.huddleFront || ""}); break;
+    case "focus": api({action: "focus", sid: sid, front: window.huddleFront || ""}); break;
     case "vscode": api({action: "vscode", sid: sid}); break;
     case "allow": api({action: "decide", rid: rid, decision: {kind: "allow"}}); break;
     case "deny": api({action: "decide", rid: rid, decision: {kind: "deny"}}); break;
