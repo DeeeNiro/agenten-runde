@@ -1,0 +1,8 @@
+# entsteht erst bei der Installation
+files/AgentenRunde
+config.json
+names.json
+ui-errors.log
+.remote_down
+__pycache__/
+.DS_Store

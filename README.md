@@ -1,7 +1,7 @@
 # Agenten-Runde
 
-Ein kleines Desktop-Widget für Windows, das alle laufenden Claude-Code-Sitzungen
-als Karten zeigt.
+Ein kleines Desktop-Widget für Windows und macOS, das alle laufenden
+Claude-Code-Sitzungen als Karten zeigt.
 
 - Fortschritt (Aufgabenliste), aktuelle Tätigkeit und letzter Terminal-Befehl pro Sitzung
 - Freigaben und Rückfragen direkt im Widget beantworten (oder wie gewohnt im Terminal)
@@ -17,27 +17,32 @@ Das Repository ist ein Claude-Code-Skill. Den Ordner nach
 
 Von Hand geht es auch:
 
-1. `files/huddle.pyw`, `files/hook.py` und `files/install.py` nach
-   `%USERPROFILE%\.claude\huddle` kopieren.
-2. `python install.py` in diesem Ordner ausführen. Das trägt die Hooks in
-   `~/.claude/settings.json` ein und legt vorher ein Backup an.
+1. Alle Dateien aus `files/` nach `~/.claude/huddle` kopieren
+   (Windows: `%USERPROFILE%\.claude\huddle`).
+2. In diesem Ordner `python install.py` ausführen (macOS: `python3 install.py`).
+   Das trägt die Hooks in `~/.claude/settings.json` ein und legt vorher ein Backup an.
+   Unter macOS wird dabei auch das kleine Fenster des Widgets gebaut.
 3. Eine neue Claude-Code-Sitzung starten. Das Widget startet automatisch mit.
 
 Entfernen: `python install.py --uninstall`.
 
 ## Voraussetzungen
 
-- Windows
-- Python 3.8 oder neuer mit Tkinter (keine weiteren Pakete nötig)
 - Claude Code
+- **Windows:** Python 3.8 oder neuer mit Tkinter (keine weiteren Pakete nötig)
+- **macOS:** das mitgelieferte `python3` (Xcode oder Xcode-Befehlszeilenwerkzeuge).
+  Damit wird auch das schwebende Fenster gebaut; ohne die Werkzeuge erscheint das
+  Widget stattdessen als Seite im Browser. Tkinter wird unter macOS nicht benutzt.
 
 ## Dateien
 
 | Datei | Zweck |
 | --- | --- |
 | `SKILL.md` | Anleitung für Claude Code: installieren, reparieren, entfernen |
-| `files/huddle.pyw` | Das Widget (Tkinter-Fenster und lokaler Server auf `127.0.0.1:47811`) |
+| `files/huddle.pyw` | Das Widget (lokaler Server auf `127.0.0.1:47811`; Windows: Tkinter-Fenster, macOS: Oberfläche als Seite) |
 | `files/hook.py` | Leitet Claude-Code-Hook-Ereignisse an das Widget weiter und startet es bei Bedarf |
-| `files/install.py` | Trägt die Hooks in `~/.claude/settings.json` ein oder entfernt sie |
+| `files/install.py` | Trägt die Hooks in `~/.claude/settings.json` ein oder entfernt sie; baut unter macOS das Fenster |
+| `files/ui.html` | Die Oberfläche für macOS |
+| `files/panel.swift` | Das schwebende Fenster für macOS (wird bei der Installation gebaut) |
 
 Das Widget hört standardmäßig nur auf `127.0.0.1`.

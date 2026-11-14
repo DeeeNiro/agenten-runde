@@ -3,6 +3,10 @@
 Receives events from hook.py on http://127.0.0.1:47811 and shows one card per
 session: progress (todos), current activity, last terminal command, and lets
 you answer permission prompts and AskUserQuestion questions inline.
+
+Windows: a Tkinter window. macOS (and anything else): the same cards as a
+small web page served on http://127.0.0.1:47811/ - shown in a native floating
+window (panel.swift, built by install.py) or, without it, in the browser.
 """
 import ctypes
 import hmac
@@ -12,16 +16,39 @@ import select
 import subprocess
 import secrets
 import socket
+import sys
 import threading
 import time
-import tkinter as tk
 import uuid
-from ctypes import wintypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 47811
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOST = socket.gethostname()
+IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+
+try:
+    import tkinter as tk
+except ImportError:   # no Tk: the web interface is used instead
+    tk = None
+
+
+def load_ui():
+    """"tk" (Windows default) or "web" (default elsewhere; Apple's built-in Tk
+    is unreliable). config.json may force one with {"ui": "tk"} / {"ui": "web"}."""
+    try:
+        with open(os.path.join(HERE, "config.json"), encoding="utf-8") as f:
+            ui = json.load(f).get("ui")
+    except Exception:
+        ui = None
+    if ui not in ("tk", "web"):
+        ui = "tk" if IS_WIN else "web"
+    return ui if tk is not None else "web"
+
+
+UI = load_ui()
+UI_TOKEN = secrets.token_urlsafe(18)   # the web page must send this back
 
 
 def load_token():
@@ -151,6 +178,11 @@ def beep():
     if ST.muted:
         return
     try:
+        if IS_MAC:
+            subprocess.Popen(["/usr/bin/afplay", "/System/Library/Sounds/Tink.aiff"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            return
         import winsound
         threading.Thread(target=winsound.MessageBeep, args=(0x40,), daemon=True).start()
     except Exception:
@@ -251,11 +283,12 @@ def gone(conn):
 def want_window(d):
     """After a widget restart the terminal window of a running session is
     unknown ('Zum Terminal' would do nothing): ask its hook to send it again."""
-    if "_hwnd" in d or d.get("_host") not in (None, HOST):
+    if "_hwnd" in d or "_term" in d or d.get("_host") not in (None, HOST):
         return {}
     with ST.lock:
         s = ST.sessions.get(d.get("session_id") or "?")
-        return {"want_window": True} if s is not None and not s.get("hwnd") else {}
+        known = s is None or s.get("hwnd") or "termwin" in s
+        return {} if known else {"want_window": True}
 
 
 def handle_event(d):
@@ -283,6 +316,8 @@ def handle_event(d):
             s["pids"] = d["_pids"]
         if d.get("_hwnd"):
             s["hwnd"] = d["_hwnd"]
+        if isinstance(d.get("_term"), dict):   # macOS: terminal app + tty
+            s["termwin"] = d["_term"]
         if ev == "SessionStart":
             s["activity"] = "Bereit"
             s["status"] = "idle"
@@ -423,16 +458,134 @@ def resolve(rid, decision):
         w[0].set()
 
 
+def dismiss(sid):
+    """Remove a card; a question still open there goes back to the terminal."""
+    with ST.lock:
+        p = ST.sessions.get(sid, {}).get("pending")
+        ST.remove(sid)
+        ST.bump()
+    if p:
+        resolve(p["rid"], {"kind": "terminal"})
+
+
+# ---------------------------------------------------------------- web interface
+def ui_state():
+    """Everything the web page needs to draw the cards."""
+    with ST.lock:
+        out = []
+        for i in ST.order:
+            s = ST.sessions.get(i)
+            if s is None:
+                continue
+            sub, col = sub_for(s)
+            p = s.get("pending")
+            out.append(dict(
+                id=s["id"], title=s["title"], custom=bool(s.get("custom")),
+                color=s["color"], status=s["status"], sub=sub, acc=col == ACC,
+                todos=s["todos"], term=s.get("term"), remote=s.get("remote") or "",
+                pending=p and dict(rid=p["rid"], kind=p["kind"], tool=p["tool"],
+                                   input=p["input"])))
+        return {"sessions": out, "muted": ST.muted}
+
+
+def ui_log(msg):
+    """Script errors of the web page, for troubleshooting."""
+    try:
+        p = os.path.join(HERE, "ui-errors.log")
+        if not os.path.exists(p) or os.path.getsize(p) < 100_000:
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + str(msg)[:2000] + "\n")
+    except OSError:
+        pass
+
+
+def ui_action(d):
+    """A click in the web page."""
+    a = d.get("action")
+    sid = str(d.get("sid") or "")
+    if a == "decide":
+        dec = d.get("decision") or {}
+        kind = dec.get("kind")
+        if kind in ("allow", "deny", "terminal"):
+            resolve(str(d.get("rid")), {"kind": kind})
+        elif kind == "answer" and isinstance(dec.get("answers"), dict):
+            resolve(str(d.get("rid")), {"kind": "answer", "answers": {
+                str(k): str(v) for k, v in dec["answers"].items()}})
+    elif a == "rename":
+        rename(sid, d.get("name") or "")
+    elif a == "dismiss":
+        dismiss(sid)
+    elif a == "mute":
+        with ST.lock:
+            ST.muted = not ST.muted
+            ST.bump()
+    elif a in ("focus", "vscode"):
+        with ST.lock:
+            s = ST.sessions.get(sid)
+            s = dict(s) if s else None
+        if s and not s.get("remote"):
+            if a == "vscode":
+                open_vscode(s)
+            elif not toggle_terminal(s) and d.get("fallback"):
+                open_vscode(s)
+    elif a == "log":
+        ui_log(d.get("msg"))
+    return {}
+
+
+def same(a, b):
+    return hmac.compare_digest(str(a).encode("utf-8"), str(b).encode("utf-8"))
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def deny(self, code=403):
+        self.send_response(code)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def local_page(self):
+        """The web interface is for this computer only: local caller and a local
+        Host header (keeps other websites and other machines out)."""
+        host = (self.headers.get("Host") or "").lower()
+        return (self.client_address[0] in ("127.0.0.1", "::1")
+                and host in (f"127.0.0.1:{PORT}", f"localhost:{PORT}"))
+
+    def ui_allowed(self):
+        return self.local_page() and same(self.headers.get("X-Huddle-UI", ""), UI_TOKEN)
+
+    def send_body(self, body, ctype):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
-        """/setup?token=...  ->  a small Python script that installs the hook on
+        """/  and /state: the web interface (this computer only).
+
+        /setup?token=...  ->  a small Python script that installs the hook on
         another PC and points it at this widget:  curl -s "<url>" | python3"""
         from urllib.parse import urlparse, parse_qs
         import base64
         u = urlparse(self.path)
+        if u.path == "/":
+            if not self.local_page():
+                return self.deny()
+            try:
+                with open(os.path.join(HERE, "ui.html"), encoding="utf-8") as f:
+                    page = f.read()
+            except OSError:
+                return self.deny(404)
+            return self.send_body(page.replace("__UI_TOKEN__", UI_TOKEN).encode("utf-8"),
+                                  "text/html; charset=utf-8")
+        if u.path == "/state":
+            if not self.ui_allowed():
+                return self.deny()
+            return self.send_body(json.dumps(ui_state()).encode("utf-8"), "application/json")
         tok = (parse_qs(u.query).get("token") or [""])[0]
         if u.path != "/setup" or not hmac.compare_digest(tok, TOKEN):
             self.send_response(403)
@@ -463,6 +616,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
+        if self.path == "/ui" and not self.ui_allowed():
+            return self.deny()
         ip = self.client_address[0]
         if ip not in ("127.0.0.1", "::1") and not hmac.compare_digest(
                 self.headers.get("X-Huddle-Token", ""), TOKEN):
@@ -484,6 +639,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path == "/ask":
                 out = handle_ask(d, self.connection)
+            elif self.path == "/ui":
+                out = ui_action(d)
             else:
                 handle_event(d)
                 out = want_window(d)
@@ -498,98 +655,196 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------- window focus
-user32 = ctypes.windll.user32
-WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+if IS_WIN:
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
 
-user32.IsWindow.argtypes = [wintypes.HWND]
-user32.IsIconic.argtypes = [wintypes.HWND]
-user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsIconic.argtypes = [wintypes.HWND]
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
 
 
-def _pid_name(pid):
-    """Executable name of a PID (lowercase), '' if unknown."""
-    k32 = ctypes.windll.kernel32
-    h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-    if not h:
-        return ""
-    try:
-        buf = ctypes.create_unicode_buffer(520)
-        n = wintypes.DWORD(520)
-        if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)):
-            return os.path.basename(buf.value).lower()
-        return ""
-    finally:
-        k32.CloseHandle(h)
+    def _pid_name(pid):
+        """Executable name of a PID (lowercase), '' if unknown."""
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(520)
+            n = wintypes.DWORD(520)
+            if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)):
+                return os.path.basename(buf.value).lower()
+            return ""
+        finally:
+            k32.CloseHandle(h)
 
 
-user32.GetForegroundWindow.restype = wintypes.HWND
-LAST_FG = [0]   # last foreground window that is not the widget itself
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    LAST_FG = [0]   # last foreground window that is not the widget itself
 
 
-def track_foreground():
-    """Called every tick: remember which foreign window was active last.
-    (When the widget is clicked it becomes the foreground window itself.)"""
-    h = user32.GetForegroundWindow()
-    if not h:
-        return
-    pid = wintypes.DWORD()
-    user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
-    if pid.value != os.getpid():
-        LAST_FG[0] = h
+    def track_foreground():
+        """Called every tick: remember which foreign window was active last.
+        (When the widget is clicked it becomes the foreground window itself.)"""
+        h = user32.GetForegroundWindow()
+        if not h:
+            return
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+        if pid.value != os.getpid():
+            LAST_FG[0] = h
 
 
-def toggle_terminal(s):
-    """'Zum Terminal': bring it to the front - or minimize it if it already was."""
-    hwnd = session_hwnd(s)
-    if hwnd and LAST_FG[0] == hwnd and not user32.IsIconic(hwnd):
-        user32.ShowWindow(hwnd, 6)          # SW_MINIMIZE
-        LAST_FG[0] = 0
-        return True
-    return focus_session(s)
-
-
-def session_hwnd(s):
-    with ST.lock:  # use the freshest data (hwnd may have arrived later)
-        s = dict(ST.sessions.get(s["id"], s))
-    hwnd = s.get("hwnd") or 0
-    return hwnd if (hwnd and user32.IsWindow(hwnd)) else 0
-
-
-def focus_session(s):
-    with ST.lock:  # use the freshest data (hwnd may have arrived later)
-        s = dict(ST.sessions.get(s["id"], s))
-    hwnd = s.get("hwnd") or 0
-    if not (hwnd and user32.IsWindow(hwnd)):
-        # Fallback: window of a process in the hook's ancestor chain.
-        # explorer.exe is excluded, otherwise a random Explorer window wins.
-        pids = [p for p in (s.get("pids") or []) if _pid_name(p) != "explorer.exe"]
-        found = []
-
-        def cb(h, _):
-            if user32.IsWindowVisible(h) and user32.GetWindowTextLengthW(h) > 0:
-                pid = wintypes.DWORD()
-                user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
-                if pid.value in pids:
-                    found.append((pids.index(pid.value), h))
+    def toggle_terminal(s):
+        """'Zum Terminal': bring it to the front - or minimize it if it already was."""
+        hwnd = session_hwnd(s)
+        if hwnd and LAST_FG[0] == hwnd and not user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 6)          # SW_MINIMIZE
+            LAST_FG[0] = 0
             return True
+        return focus_session(s)
 
-        user32.EnumWindows(WNDENUMPROC(cb), 0)
-        if not found:
+
+    def session_hwnd(s):
+        with ST.lock:  # use the freshest data (hwnd may have arrived later)
+            s = dict(ST.sessions.get(s["id"], s))
+        hwnd = s.get("hwnd") or 0
+        return hwnd if (hwnd and user32.IsWindow(hwnd)) else 0
+
+
+    def focus_session(s):
+        with ST.lock:  # use the freshest data (hwnd may have arrived later)
+            s = dict(ST.sessions.get(s["id"], s))
+        hwnd = s.get("hwnd") or 0
+        if not (hwnd and user32.IsWindow(hwnd)):
+            # Fallback: window of a process in the hook's ancestor chain.
+            # explorer.exe is excluded, otherwise a random Explorer window wins.
+            pids = [p for p in (s.get("pids") or []) if _pid_name(p) != "explorer.exe"]
+            found = []
+
+            def cb(h, _):
+                if user32.IsWindowVisible(h) and user32.GetWindowTextLengthW(h) > 0:
+                    pid = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+                    if pid.value in pids:
+                        found.append((pids.index(pid.value), h))
+                return True
+
+            user32.EnumWindows(WNDENUMPROC(cb), 0)
+            if not found:
+                return False
+            hwnd = sorted(found)[0][1]
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)
+        user32.keybd_event(0x12, 0, 0, 0)       # Alt tap lets us steal focus
+        user32.keybd_event(0x12, 0, 2, 0)
+        user32.SetForegroundWindow(hwnd)
+        return True
+
+
+    def open_vscode(s):
+        if s.get("cwd"):
+            subprocess.Popen(f'code "{s["cwd"]}"', shell=True, creationflags=0x08000000)
+
+elif IS_MAC:
+    # A session is found by the terminal's tty (Terminal, iTerm2); other apps
+    # (VS Code, ...) are simply brought to the front.
+    TAB_SCRIPTS = {
+        "Terminal": """on run argv
+  tell application "Terminal"
+    repeat with w in windows
+      repeat with t in tabs of w
+        if tty of t is (item 1 of argv) then
+          set selected of t to true
+          if miniaturized of w then set miniaturized of w to false
+          set index of w to 1
+          activate
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end tell
+  return "no"
+end run""",
+        "iTerm": """on run argv
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with ss in sessions of t
+          if tty of ss is (item 1 of argv) then
+            select w
+            select t
+            select ss
+            activate
+            return "ok"
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  return "no"
+end run""",
+    }
+
+    def _focus(app, tty):
+        script = TAB_SCRIPTS.get(os.path.basename(app)[:-4])
+        if script and tty:
+            try:
+                r = subprocess.run(["/usr/bin/osascript", "-", tty], input=script,
+                                   capture_output=True, text=True, timeout=60)
+                if r.returncode == 0 and r.stdout.strip() == "ok":
+                    return
+            except Exception:
+                pass
+        subprocess.call(["/usr/bin/open", "-a", app])
+
+    def track_foreground():
+        pass
+
+    def focus_session(s):
+        with ST.lock:  # use the freshest data (the window may have arrived later)
+            s = dict(ST.sessions.get(s["id"], s))
+        t = s.get("termwin") or {}
+        app = t.get("app") or ""
+        if not (app.endswith(".app") and os.path.isdir(app)):
             return False
-        hwnd = sorted(found)[0][1]
-    if user32.IsIconic(hwnd):
-        user32.ShowWindow(hwnd, 9)
-    user32.keybd_event(0x12, 0, 0, 0)       # Alt tap lets us steal focus
-    user32.keybd_event(0x12, 0, 2, 0)
-    user32.SetForegroundWindow(hwnd)
-    return True
+        threading.Thread(target=_focus, args=(app, t.get("tty") or ""), daemon=True).start()
+        return True
 
+    toggle_terminal = focus_session
 
-def open_vscode(s):
-    if s.get("cwd"):
-        subprocess.Popen(f'code "{s["cwd"]}"', shell=True, creationflags=0x08000000)
+    def open_vscode(s):
+        cwd = s.get("cwd")
+        if not (cwd and os.path.isdir(cwd)):
+            return
+
+        def run():  # without VS Code: show the folder in the Finder
+            if subprocess.call(["/usr/bin/open", "-a", "Visual Studio Code", cwd],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL):
+                subprocess.call(["/usr/bin/open", cwd])
+        threading.Thread(target=run, daemon=True).start()
+
+else:
+    def track_foreground():
+        pass
+
+    def focus_session(s):
+        return False
+
+    toggle_terminal = focus_session
+
+    def open_vscode(s):
+        cwd = s.get("cwd")
+        if cwd and os.path.isdir(cwd):
+            try:
+                subprocess.Popen(["code", cwd])
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------- UI helpers
@@ -1078,7 +1333,9 @@ class App:
 
 def main():
     try:
-        ThreadingHTTPServer.allow_reuse_address = False
+        # Windows: never share the port. Elsewhere SO_REUSEADDR still refuses a
+        # second widget, but lets a restart bind right after the old one ended.
+        ThreadingHTTPServer.allow_reuse_address = not IS_WIN
         # Local only by default. To let other PCs in, add "listen": "0.0.0.0"
         # to config.json (they must send the token).
         try:
@@ -1091,11 +1348,37 @@ def main():
         return  # already running
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    if UI == "web":
+        return run_web()
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
     App().root.mainloop()
+
+
+def run_web():
+    """Show the web interface: in the native floating window on macOS (closing
+    it ends the widget, like the X on Windows), otherwise in the browser."""
+    url = f"http://127.0.0.1:{PORT}/"
+    panel = os.path.join(HERE, "AgentenRunde")
+    if IS_MAC and os.access(panel, os.X_OK):
+        t = time.time()
+        try:
+            rc = subprocess.call([panel, url], stdin=subprocess.DEVNULL)
+            if rc == 0 or time.time() - t > 5:   # closed (not: failed to start)
+                return
+        except OSError:
+            pass
+    try:
+        if IS_MAC:
+            subprocess.call(["/usr/bin/open", url])
+        else:
+            import webbrowser
+            webbrowser.open(url)
+    except Exception:
+        pass
+    threading.Event().wait()   # keep serving until the process is stopped
 
 
 if __name__ == "__main__":

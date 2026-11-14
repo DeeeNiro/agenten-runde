@@ -1,12 +1,17 @@
 """Registriert die Agenten-Runde-Hooks in ~/.claude/settings.json (mit Backup).
 
-Dieser PC (mit Widget):      python install.py
-Anderer PC (Windows/Mac):    python3 install.py --server http://<IP>:47811 --token <SCHLUESSEL>
-Entfernen:                   python install.py --uninstall
+Dieser Rechner (mit Widget):  python install.py        (macOS: python3 install.py)
+Anderer Rechner (Win/Mac):    python3 install.py --server http://<IP>:47811 --token <SCHLUESSEL>
+Entfernen:                    python install.py --uninstall
+
+Auf dem Mac wird zusaetzlich das kleine Fenster des Widgets gebaut (panel.swift ->
+AgentenRunde). Das braucht die Xcode-Befehlszeilenwerkzeuge; ohne sie erscheint
+das Widget stattdessen im Browser.
 """
 import json
 import os
 import shutil
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -31,6 +36,45 @@ if server or token:
         json.dump({"server": server.rstrip("/"), "token": token}, f, indent=2)
     print("Fern-Widget eingetragen:", server)
 
+
+
+def is_remote():
+    try:
+        with open(os.path.join(HERE, "config.json"), encoding="utf-8") as f:
+            return bool(json.load(f).get("server"))
+    except Exception:
+        return False
+
+
+def build_panel():
+    """macOS: natives Fenster fuer das Widget bauen."""
+    src = os.path.join(HERE, "panel.swift")
+    out = os.path.join(HERE, "AgentenRunde")
+    if not os.path.exists(src):
+        return
+    if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(src):
+        print("Fenster: vorhanden.")
+        return
+    ok, err = False, "Xcode-Befehlszeilenwerkzeuge fehlen"
+    try:
+        # ohne Entwicklerwerkzeuge wuerde xcrun nur einen Installationsdialog oeffnen
+        if subprocess.call(["/usr/bin/xcode-select", "-p"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL) == 0:
+            r = subprocess.run(["/usr/bin/xcrun", "swiftc", "-O", src, "-o", out],
+                               capture_output=True, text=True, timeout=900)
+            ok, err = r.returncode == 0, (r.stderr or r.stdout).strip()[-600:]
+    except (OSError, subprocess.TimeoutExpired) as e:
+        err = str(e)
+    if ok:
+        print("Fenster: gebaut.")
+    else:
+        print("Fenster konnte nicht gebaut werden - das Widget erscheint im Browser.")
+        print("  Grund:", err)
+
+
+if sys.platform == "darwin" and "--uninstall" not in args and not is_remote():
+    build_panel()
+
 # --- hooks in settings.json
 p = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
 os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -41,6 +85,9 @@ if os.path.exists(p):
 else:
     s = {}
 py = sys.executable.replace("\\", "/")
+if sys.platform == "darwin" and os.path.exists("/usr/bin/python3") and py.startswith(
+        ("/Applications/Xcode", "/Library/Developer/CommandLineTools")):
+    py = "/usr/bin/python3"   # fester Pfad, bleibt nach Xcode-Updates gueltig
 hook = os.path.join(HERE, "hook.py").replace("\\", "/")
 cmd = f'"{py}" "{hook}"'
 hooks = s.setdefault("hooks", {})

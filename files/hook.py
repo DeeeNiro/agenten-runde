@@ -1,7 +1,7 @@
 """Agent Huddle hook: forwards Claude Code hook events to the Huddle widget.
 
-Local mode (default, Windows): talks to the widget on this PC and auto-starts it
-on SessionStart / UserPromptSubmit.
+Local mode (default, Windows and macOS): talks to the widget on this computer
+and auto-starts it on SessionStart / UserPromptSubmit.
 
 Remote mode (any OS): if config.json next to this file names a "server"
 (e.g. {"server": "http://100.101.102.103:47811", "token": "..."}), events go to
@@ -20,6 +20,7 @@ import urllib.request
 PORT = 47811
 HERE = os.path.dirname(os.path.abspath(__file__))
 IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
 
 
 def load_config():
@@ -131,7 +132,54 @@ def terminal_hwnd(pids):
     return 0
 
 
+# ------------------------------------------------------------ macOS only
+def mac_terminal():
+    """(ancestor PIDs, {"app": bundle path, "tty": device}) of this session.
+
+    The widget uses them to bring the right terminal window to the front.
+    """
+    try:
+        out = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,tty=,comm="],
+                             capture_output=True, text=True, timeout=3).stdout
+        table = {}
+        for line in out.splitlines():
+            parts = line.split(None, 3)
+            if len(parts) == 4 and parts[0].isdigit() and parts[1].isdigit():
+                table[int(parts[0])] = (int(parts[1]), parts[2], parts[3])
+        chain, pid, app, tty = [], os.getpid(), "", ""
+        for _ in range(30):
+            pid = table.get(pid, (0, "", ""))[0]
+            if pid <= 1 or pid in chain or pid not in table:
+                break
+            chain.append(pid)
+            _, t, comm = table[pid]
+            if not tty and t not in ("??", "-", ""):
+                tty = "/dev/" + t
+            i = comm.find(".app/")
+            if not app and i > 0:
+                app = comm[:i + 4]
+        return chain, {"app": app, "tty": tty}
+    except Exception:
+        return [], {"app": "", "tty": ""}
+
+
+def add_window(data):
+    """Tell the widget which terminal window this session lives in."""
+    if IS_WIN:
+        data["_pids"] = ancestors()
+        data["_hwnd"] = terminal_hwnd(data["_pids"])
+    elif IS_MAC:
+        data["_pids"], data["_term"] = mac_terminal()
+
+
 def start_widget():
+    if not IS_WIN:
+        env = dict(os.environ, TK_SILENCE_DEPRECATION="1")
+        subprocess.Popen([sys.executable, os.path.join(HERE, "huddle.pyw")],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True,
+                         close_fds=True, env=env, cwd=HERE)
+        return
     pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     if not os.path.exists(pyw):
         pyw = sys.executable
@@ -152,8 +200,7 @@ def main():
     ev = data.get("hook_event_name", "")
     data["_host"] = socket.gethostname()
     if ev in ("SessionStart", "UserPromptSubmit") and not REMOTE:
-        data["_pids"] = ancestors()
-        data["_hwnd"] = terminal_hwnd(data["_pids"])
+        add_window(data)
 
     if REMOTE and remote_down():
         return  # widget recently unreachable: answer in the terminal as usual
@@ -169,20 +216,21 @@ def main():
                 sys.stdout.write(json.dumps(out))
         else:
             r = post("/event", data, timeout=2)
-            if r.get("want_window") and IS_WIN and not REMOTE and "_hwnd" not in data:
-                pids = ancestors()  # widget was restarted and lost our window
-                post("/event", {"hook_event_name": "_Window", "_host": data["_host"],
-                                "session_id": data.get("session_id"),
-                                "cwd": data.get("cwd", ""),
-                                "_pids": pids, "_hwnd": terminal_hwnd(pids)}, timeout=2)
+            if (r.get("want_window") and not REMOTE
+                    and "_hwnd" not in data and "_term" not in data):
+                win = {"hook_event_name": "_Window", "_host": data["_host"],
+                       "session_id": data.get("session_id"), "cwd": data.get("cwd", "")}
+                add_window(win)  # widget was restarted and lost our window
+                if "_hwnd" in win or "_term" in win:
+                    post("/event", win, timeout=2)
     except (urllib.error.URLError, ConnectionError, OSError):
         if REMOTE:
             if not blocking:  # an unanswered question timing out is not "down"
                 mark_down()
-        elif IS_WIN and ev in ("SessionStart", "UserPromptSubmit"):
+        elif ev in ("SessionStart", "UserPromptSubmit"):
             try:
                 start_widget()
-                for _ in range(20):
+                for _ in range(30):
                     time.sleep(0.15)
                     try:
                         post("/event", data, timeout=2)

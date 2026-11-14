@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agenten-Runde</title>
+<style>
+:root{--bg:#121312;--card:#1e1f1e;--hi:#262826;--txt:#f2f2f2;--sub:#9a9b9a;--dim:#6b6c6b;
+  --acc:#d4f046;--bar:#3a3b3a;--well:#151615;--btn:#333533}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--txt);
+  font:13px/1.35 -apple-system,"Segoe UI",system-ui,sans-serif;
+  -webkit-user-select:none;user-select:none;cursor:default}
+body{padding:8px;overflow-x:hidden}
+#app{width:324px;max-width:100%}
+.head{display:flex;align-items:center;gap:6px;padding:2px 2px 8px;font-weight:600}
+.head .dot{color:var(--acc);font-size:10px}
+.head .n{color:var(--dim)}
+.head .sp{flex:1}
+.ic{color:var(--sub);cursor:pointer;padding:0 4px;font-size:13px;line-height:1}
+.ic:hover{color:var(--txt)}
+.ic.on{color:var(--acc)}
+.ic.off{color:var(--dim);text-decoration:line-through}
+.empty{color:var(--dim);padding:0 2px 6px}
+.card{background:var(--card);border:1px solid transparent;border-radius:6px;margin:0 0 6px;cursor:pointer}
+.card.hi{background:var(--hi);border-color:var(--acc)}
+.top{display:flex;gap:8px;padding:6px 8px;align-items:flex-start}
+.mid{flex:1;min-width:0}
+.trow{display:flex;align-items:center;gap:4px}
+.title{flex:1;min-width:0;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub{color:var(--sub);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub.acc{color:var(--acc)}
+.prog{display:flex;gap:4px;font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden}
+.prog .c{color:var(--acc)}
+.prog .cur{color:var(--sub);overflow:hidden;text-overflow:ellipsis}
+.bar{height:4px;width:200px;max-width:100%;background:var(--bar);margin-top:3px}
+.bar i{display:block;height:4px;background:var(--acc)}
+.side{display:flex;flex-direction:column;align-items:center;gap:2px}
+.box{padding:0 10px 8px}
+.todo{display:flex;gap:6px;font-size:12px;color:var(--sub)}
+.todo .s{width:14px;text-align:center;flex:none}
+.todo.completed{color:var(--dim)}
+.todo.in_progress{color:var(--txt);font-weight:600}
+.todo.in_progress .s{color:var(--acc)}
+.todo span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.well{background:var(--well);padding:4px 6px;margin-top:6px;
+  font:11px/1.4 Menlo,Consolas,monospace;color:var(--sub);overflow:hidden}
+.well div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.well .h{font:600 11px -apple-system,"Segoe UI",system-ui,sans-serif}
+.well .h,.well .cmd{color:var(--acc)}
+.what{background:var(--well);padding:5px 6px;font:11px/1.4 Menlo,Consolas,monospace;
+  word-break:break-all;white-space:pre-wrap}
+.btns{display:flex;gap:6px;margin-top:6px;align-items:center}
+.btn{background:var(--btn);color:var(--txt);font-size:11px;font-weight:600;padding:3px 10px;cursor:pointer}
+.btn.pri{background:var(--acc);color:#111}
+.note{color:var(--dim);font-size:12px}
+.qh{display:inline-block;background:var(--acc);color:#111;font-size:10px;font-weight:600;
+  padding:0 4px;margin:4px 0 2px}
+.q{font-weight:600}
+.opt{background:#1a1b1a;margin:2px 0;padding:2px 6px;cursor:pointer;font-size:12px}
+.opt.on{background:#2c2e2c;color:var(--acc)}
+.opt small{display:block;color:var(--dim);padding-left:18px;font-size:11px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+input.edit{flex:1;min-width:0;background:var(--well);color:var(--txt);border:1px solid var(--acc);
+  font:600 13px -apple-system,"Segoe UI",system-ui,sans-serif;padding:1px 4px;outline:none;
+  -webkit-user-select:text;user-select:text}
+.offline{color:#f26b6b;padding:0 2px 6px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+"use strict";
+const TOKEN = "__UI_TOKEN__";
+let state = {sessions: [], muted: false};
+let last = "", offline = false, collapsed = false;
+const expanded = new Set();
+const choices = {};          // rid -> {question index: Set(labels)}
+let editing = null;          // {sid, value, fresh}
+
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g,
+  c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const short = (t, n) => {
+  t = String(t == null ? "" : t).split(/\s+/).join(" ").trim();
+  return t.length <= n ? t : t.slice(0, n - 1) + "…";
+};
+
+function send(body) {
+  return fetch("/ui", {method: "POST", cache: "no-store",
+    headers: {"Content-Type": "application/json", "X-Huddle-UI": TOKEN},
+    body: JSON.stringify(body)}).catch(() => {});
+}
+function api(body) { return send(body).then(poll); }
+
+async function poll() {
+  try {
+    const r = await fetch("/state", {headers: {"X-Huddle-UI": TOKEN}, cache: "no-store"});
+    if (r.status === 403) { location.reload(); return; }   // widget was restarted
+    const t = await r.text();
+    if (t !== last || offline) { last = t; offline = false; state = JSON.parse(t); render(); }
+  } catch (e) {
+    if (!offline) { offline = true; render(); }
+  }
+}
+
+function mascot(color, mood) {
+  const eyes = mood === "done"
+    ? '<path d="M10 15a3 3 0 0 1 6 0M18 15a3 3 0 0 1 6 0" fill="none" stroke="#111" stroke-width="2"/>'
+    : '<rect x="11" y="13" width="3" height="4" fill="#111"/><rect x="20" y="13" width="3" height="4" fill="#111"/>';
+  const mouth = mood === "ask"
+    ? '<circle cx="17" cy="25" r="3" fill="none" stroke="#111" stroke-width="2"/>'
+    : '<path d="M13 25h8" stroke="#111" stroke-width="2"/>';
+  return '<svg width="34" height="44" viewBox="0 0 34 44"><ellipse cx="17" cy="40" rx="11" ry="3" fill="#0c0c0c"/>'
+    + '<rect x="7" y="4" width="20" height="32" rx="6" fill="' + esc(color) + '"/>' + eyes + mouth + '</svg>';
+}
+
+function permissionBox(s, p) {
+  const inp = p.input || {};
+  let what;
+  if (p.tool === "Bash" || p.tool === "PowerShell") what = p.tool + ": " + (inp.command || "");
+  else if ("file_path" in inp) what = p.tool + ": " + inp.file_path;
+  else if ("url" in inp) what = p.tool + ": " + inp.url;
+  else what = p.tool + ": " + short(JSON.stringify(inp), 120);
+  return '<div class="box"><div class="what">' + esc(short(what, 220)) + '</div><div class="btns">'
+    + '<span class="btn pri" data-act="allow" data-rid="' + p.rid + '">Erlauben</span>'
+    + '<span class="btn" data-act="deny" data-rid="' + p.rid + '">Ablehnen</span>'
+    + '<span class="btn" data-act="terminal" data-rid="' + p.rid + '" data-sid="' + esc(s.id) + '">'
+    + (s.remote ? "Am PC" : "Im Terminal") + '</span></div></div>';
+}
+
+function questionBox(s, p) {
+  const qs = (p.input || {}).questions || [];
+  const sel = choices[p.rid] = choices[p.rid] || {};
+  let h = '<div class="box">', ready = qs.length > 0;
+  qs.forEach((q, qi) => {
+    const chosen = sel[qi] = sel[qi] || new Set();
+    if (!chosen.size) ready = false;
+    if (q.header) h += '<div class="qh">' + esc(String(q.header).toUpperCase()) + '</div>';
+    h += '<div class="q">' + esc(q.question || "") + '</div>';
+    (q.options || []).forEach((o, oi) => {
+      const on = chosen.has(o.label || "");
+      const mark = q.multiSelect ? (on ? "☑" : "☐") : (on ? "◉" : "○");
+      h += '<div class="opt' + (on ? " on" : "") + '" data-act="pick" data-rid="' + p.rid
+        + '" data-q="' + qi + '" data-o="' + oi + '">' + mark + "&nbsp; " + esc(o.label || "")
+        + (o.description ? "<small>" + esc(short(o.description, 70)) + "</small>" : "") + "</div>";
+    });
+  });
+  return h + '<div class="btns"><span class="btn' + (ready ? " pri" : "") + '" data-act="send" data-rid="'
+    + p.rid + '">Senden</span><span class="btn" data-act="terminal" data-rid="' + p.rid
+    + '" data-sid="' + esc(s.id) + '">' + (s.remote ? "Am PC" : "Im Terminal") + '</span></div></div>';
+}
+
+function details(s) {
+  let h = '<div class="box">';
+  const sym = {completed: "✓", in_progress: "◐"};
+  for (const t of s.todos)
+    h += '<div class="todo ' + esc(t.status) + '"><span class="s">' + (sym[t.status] || "○")
+      + "</span><span>" + esc(short(t.content, 60)) + "</span></div>";
+  if (s.term) {
+    h += '<div class="well"><div class="h">▣ Terminal</div><div class="cmd">$ ' + esc(short(s.term.cmd, 80)) + "</div>";
+    for (const line of s.term.out || []) h += "<div>" + esc(short(line, 90)) + "</div>";
+    h += "</div>";
+  }
+  if (!s.todos.length && !s.term) h += '<div class="note">Noch keine Details</div>';
+  h += '<div class="btns">';
+  if (s.remote) h += '<span class="note">läuft auf ' + esc(s.remote) + "</span>";
+  else h += '<span class="btn" data-act="focus" data-sid="' + esc(s.id) + '">Zum Terminal</span>'
+    + '<span class="btn" data-act="vscode" data-sid="' + esc(s.id) + '">In VS Code</span>';
+  return h + "</div></div>";
+}
+
+function card(s) {
+  const p = s.pending;
+  const hi = !!p || s.status === "waiting" || s.status === "permission";
+  const mood = s.status === "done" ? "done" : (hi ? "ask" : "normal");
+  const sid = esc(s.id);
+  let h = '<div class="card' + (hi ? " hi" : "") + '" data-card="' + sid + '"><div class="top">'
+    + mascot(s.color, mood) + '<div class="mid"><div class="trow">';
+  if (editing && editing.sid === s.id)
+    h += '<input class="edit" id="edit" maxlength="60" value="' + esc(editing.value) + '">'
+      + '<span class="ic on" data-act="commit">✓</span>';
+  else
+    h += '<div class="title">' + esc((s.remote ? s.remote + " › " : "") + s.title) + "</div>"
+      + '<span class="ic" data-act="edit" data-sid="' + sid + '" title="Umbenennen">✎</span>';
+  h += '</div><div class="sub' + (s.acc ? " acc" : "") + '">' + esc(short(s.sub, 60)) + "</div>";
+  if (s.todos.length) {
+    const done = s.todos.filter(t => t.status === "completed").length;
+    const cur = s.todos.find(t => t.status === "in_progress");
+    h += '<div class="prog"><span class="c">' + done + "/" + s.todos.length + "</span>"
+      + (cur ? '<span class="cur">' + esc(short(cur.active, 40)) + "</span>" : "") + "</div>"
+      + '<div class="bar"><i style="width:' + Math.round(100 * done / s.todos.length) + '%"></i></div>';
+  }
+  h += '</div><div class="side">';
+  if (!s.remote) h += '<span class="ic" data-act="jump" data-sid="' + sid + '" title="Zum Terminal">⧉</span>';
+  h += '<span class="ic" data-act="dismiss" data-sid="' + sid + '" title="Karte entfernen">×</span></div></div>';
+  if (p && p.kind === "permission") h += permissionBox(s, p);
+  else if (p && p.kind === "question") h += questionBox(s, p);
+  else if (expanded.has(s.id)) h += details(s);
+  return h + "</div>";
+}
+
+function render() {
+  const ss = state.sessions || [];
+  const rids = new Set(ss.filter(s => s.pending).map(s => s.pending.rid));
+  for (const k of Object.keys(choices)) if (!rids.has(k)) delete choices[k];
+  if (editing && (collapsed || !ss.some(s => s.id === editing.sid))) editing = null;
+  let h = '<div class="head"><span class="dot">●</span><span>Agenten-Runde</span><span class="n">'
+    + ss.length + '</span><span class="sp"></span>'
+    + '<span class="ic ' + (state.muted ? "off" : "on") + '" data-act="mute" title="Ton an/aus">♪</span>'
+    + '<span class="ic" data-act="collapse">' + (collapsed ? "▾" : "▴") + "</span></div>";
+  if (offline) h += '<div class="offline">Widget nicht erreichbar</div>';
+  else if (!collapsed) h += ss.length ? ss.map(card).join("") : '<div class="empty">Keine laufenden Sessions</div>';
+  const app = document.getElementById("app");
+  app.innerHTML = h;
+  const e = document.getElementById("edit");
+  if (e) {
+    e.focus();
+    if (editing.fresh) { e.select(); editing.fresh = false; }
+    else e.setSelectionRange(e.value.length, e.value.length);
+  }
+  const height = Math.ceil(app.getBoundingClientRect().height) + 16;
+  try { window.webkit.messageHandlers.huddle.postMessage(height); } catch (err) {}
+}
+
+function pendingOf(rid) {
+  const s = (state.sessions || []).find(x => x.pending && x.pending.rid === rid);
+  return s ? s.pending : null;
+}
+
+function commitEdit() {
+  if (!editing) return;
+  const e = editing;
+  editing = null;
+  render();
+  api({action: "rename", sid: e.sid, name: e.value});
+}
+
+document.addEventListener("click", ev => {
+  if (ev.target.closest("input")) return;
+  const a = ev.target.closest("[data-act]");
+  if (!a) {
+    const c = ev.target.closest("[data-card]");
+    if (c) {
+      const sid = c.dataset.card;
+      if (expanded.has(sid)) expanded.delete(sid); else expanded.add(sid);
+      render();
+    }
+    return;
+  }
+  const d = a.dataset, rid = d.rid, sid = d.sid;
+  switch (d.act) {
+    case "mute": api({action: "mute"}); break;
+    case "collapse": collapsed = !collapsed; render(); break;
+    case "edit": {
+      const s = state.sessions.find(x => x.id === sid);
+      editing = {sid: sid, value: s && s.custom ? s.title : "", fresh: true};
+      render();
+      break;
+    }
+    case "commit": commitEdit(); break;
+    case "dismiss": expanded.delete(sid); api({action: "dismiss", sid: sid}); break;
+    case "jump": api({action: "focus", sid: sid, fallback: true}); break;
+    case "focus": api({action: "focus", sid: sid}); break;
+    case "vscode": api({action: "vscode", sid: sid}); break;
+    case "allow": api({action: "decide", rid: rid, decision: {kind: "allow"}}); break;
+    case "deny": api({action: "decide", rid: rid, decision: {kind: "deny"}}); break;
+    case "terminal":
+      api({action: "decide", rid: rid, decision: {kind: "terminal"}});
+      setTimeout(() => send({action: "focus", sid: sid}), 400);
+      break;
+    case "pick": {
+      const p = pendingOf(rid);
+      if (!p) break;
+      const q = ((p.input || {}).questions || [])[+d.q];
+      const lab = q && (q.options || [])[+d.o] ? (q.options[+d.o].label || "") : null;
+      if (lab === null) break;
+      const sel = choices[rid] = choices[rid] || {};
+      const chosen = sel[d.q] = sel[d.q] || new Set();
+      if (q.multiSelect) { if (chosen.has(lab)) chosen.delete(lab); else chosen.add(lab); }
+      else { chosen.clear(); chosen.add(lab); }
+      render();
+      break;
+    }
+    case "send": {
+      const p = pendingOf(rid);
+      if (!p) break;
+      const qs = (p.input || {}).questions || [], sel = choices[rid] || {}, answers = {};
+      if (!qs.length || !qs.every((q, i) => sel[i] && sel[i].size)) break;
+      qs.forEach((q, i) => { answers[q.question] = Array.from(sel[i]).sort().join(", "); });
+      api({action: "decide", rid: rid, decision: {kind: "answer", answers: answers}});
+      break;
+    }
+  }
+});
+document.addEventListener("input", ev => {
+  if (ev.target.id === "edit" && editing) editing.value = ev.target.value;
+});
+document.addEventListener("keydown", ev => {
+  if (ev.target.id !== "edit") return;
+  if (ev.key === "Enter") commitEdit();
+  else if (ev.key === "Escape") { editing = null; render(); }
+});
+window.addEventListener("error", ev => { send({action: "log", msg: String(ev.message) + " @" + ev.lineno}); });
+
+render();
+poll();
+setInterval(poll, 500);
+</script>
+</body>
+</html>
