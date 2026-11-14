@@ -96,10 +96,40 @@ unzuverlässig und stürzt teils sofort ab - nicht verwenden, nicht testen).
 
 ## Rückmeldung (beide Systeme)
 
-Kurz sagen, dass das Widget läuft, und dass die Hooks erst in neu gestarteten
-Claude-Code-Sitzungen greifen. Das Widget startet künftig automatisch mit der ersten
-Sitzung. Wird das Fenster geschlossen, erscheint es bei der nächsten Eingabe in einer
-Sitzung wieder.
+Kurz sagen, dass das Widget läuft. Eine Karte erscheint, sobald in einer Sitzung das
+nächste Ereignis eintrifft (z. B. die nächste Eingabe); taucht eine schon länger laufende
+Sitzung danach immer noch nicht auf, hilft ein Neustart dieser Sitzung
+(`claude --continue` setzt das Gespräch fort). Ein Terminal ohne Claude Code erscheint nie.
+Das Widget startet künftig automatisch mit der ersten Sitzung. Wird das Fenster
+geschlossen, erscheint es bei der nächsten Eingabe in einer Sitzung wieder.
+
+## Aktualisieren
+
+Neue Fassung der Dateien aus `files/` in den huddle-Ordner kopieren (Schritt "Dateien
+kopieren"), `install.py` erneut ausführen (baut unter macOS das Fenster neu) und das
+Widget neu starten: beenden wie unter "Entfernen" beschrieben, dann starten wie im
+Schritt "Widget starten". Nach einem Neustart ist das Widget kurz leer; jede Karte kommt
+mit dem nächsten Ereignis ihrer Sitzung zurück. Hinweis: `install.py` überschreibt bei
+jedem Lauf das Backup `settings.json.bak-huddle` mit dem aktuellen Stand.
+
+## Was die Karten zeigen
+
+- **Titel:** Ordnername und Anfang der ersten Eingabe; über das Stift-Symbol frei benennbar.
+- **Zeile darunter:** aktuelle Tätigkeit ("Denkt nach…", "Liest …", "Fertig ✓",
+  "wartet auf dich", "braucht Erlaubnis").
+- **"Im Hintergrund: …":** Claude hat seine Antwort beendet, aber ein Hintergrundbefehl
+  oder ein Hintergrund-Agent der Sitzung läuft noch. Die Karte bleibt so (ohne Signalton),
+  bis Claude Code das Ende meldet; erst dann steht dort "Fertig ✓". Befehle und Agenten,
+  die vor dem Start des Widgets begonnen haben, kennt die Karte nicht. Ist die Sitzung
+  gerade selbst beschäftigt, kommt die Ende-Meldung eines Agenten erst mit ihrem nächsten
+  Arbeitsschritt an.
+- **Fortschritt:** Aufgabenliste der Sitzung als Zähler und Balken; ein Klick auf die
+  Karte klappt Aufgaben und den letzten Terminal-Befehl auf.
+- **"Zum Terminal" / ⧉:** holt das Terminal der Sitzung nach vorn; war es schon vorn,
+  klappt der Klick es wieder ein (Windows: jedes Terminal-Fenster; macOS: Terminal und
+  iTerm2, andere Apps werden nur nach vorn geholt).
+- **Freigaben und Fragen:** direkt in der Karte beantwortbar ("Erlauben", "Ablehnen",
+  Antwort wählen und "Senden") oder mit "Im Terminal" dorthin abgeben.
 
 ## Fehlerbilder
 

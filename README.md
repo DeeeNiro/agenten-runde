@@ -4,9 +4,11 @@ Ein kleines Desktop-Widget für Windows und macOS, das alle laufenden
 Claude-Code-Sitzungen als Karten zeigt.
 
 - Fortschritt (Aufgabenliste), aktuelle Tätigkeit und letzter Terminal-Befehl pro Sitzung
+- Zeigt an, wenn nach Claudes Antwort noch ein Hintergrundbefehl oder Hintergrund-Agent läuft
 - Freigaben und Rückfragen direkt im Widget beantworten (oder wie gewohnt im Terminal)
 - Jeder Sitzung einen eigenen Namen geben (Stift-Symbol neben dem Titel)
-- Per Klick zum passenden Terminal-Fenster springen oder den Ordner in VS Code öffnen
+- Per Klick zum passenden Terminal-Fenster springen (zweiter Klick klappt es wieder ein)
+  oder den Ordner in VS Code öffnen
 - Sitzungen von anderen Rechnern können in derselben Liste erscheinen
 
 ## Installation
