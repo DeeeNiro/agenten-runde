@@ -331,9 +331,14 @@ def handle_event(d):
             s["status"] = "idle"
         elif ev == "UserPromptSubmit":
             p = d.get("prompt", "")
+            # A background command or agent ended; Claude Code reports that as
+            # a prompt (task notification, or the agent handing back its result).
             if p.lstrip().startswith("<task-notification>"):
-                # a background command ended; Claude Code reports it as a prompt
                 m = re.search(r"<task-id>([^<]+)</task-id>", p)
+                if m:
+                    s["bg"].pop(m.group(1).strip(), None)
+            elif p.lstrip().startswith("<agent-message") and "[Subagent hand-back]" in p:
+                m = re.match(r'\s*<agent-message from="([^"]+)"', p)
                 if m:
                     s["bg"].pop(m.group(1).strip(), None)
             if not s["named"] and p.strip() and not p.strip().startswith(("/", "<")):
@@ -355,6 +360,10 @@ def handle_event(d):
             if isinstance(resp, dict) and resp.get("backgroundTaskId"):
                 s["bg"][str(resp["backgroundTaskId"])] = short(
                     inp.get("description") or inp.get("command") or name, 36)
+            elif (isinstance(resp, dict) and resp.get("agentId")
+                  and (resp.get("isAsync") or resp.get("status") == "async_launched")):
+                s["bg"][str(resp["agentId"])] = "Agent " + short(
+                    inp.get("description") or resp.get("description") or "", 30)
             if name in ("KillShell", "KillBash", "TaskStop"):
                 for k in ("shell_id", "task_id", "bash_id", "id"):
                     s["bg"].pop(str(inp.get(k)), None)
