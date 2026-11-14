@@ -6,3 +6,4 @@ ui-errors.log
 .remote_down
 __pycache__/
 .DS_Store
+events.log

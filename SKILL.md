@@ -116,6 +116,9 @@ Sitzung wieder.
   lesen - dort stehen Skriptfehler der Oberfläche.
 - **macOS: "Zum Terminal" holt nur die App nach vorn:** Die Freigabe fehlt. Unter
   Systemeinstellungen > Datenschutz & Sicherheit > Automation für Python das Terminal erlauben.
+- **Eine Karte zeigt etwas anderes als die Sitzung tut:** In `config.json` im
+  huddle-Ordner `"debug": true` ergänzen und das Widget neu starten. Dann schreibt es jedes
+  eingehende Ereignis nach `events.log` im selben Ordner. Nach der Fehlersuche wieder entfernen.
 - **Rückfragen stehen im Terminal und im Widget:** Gewollt. Man kann an beiden Stellen
   antworten; die erste Antwort gilt, und die Frage verschwindet an der anderen Stelle.
 

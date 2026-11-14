@@ -12,6 +12,7 @@ import ctypes
 import hmac
 import json
 import os
+import re
 import select
 import subprocess
 import secrets
@@ -136,7 +137,7 @@ class State:
                      title=name or os.path.basename(cwd.rstrip("\\/")) or "Session",
                      named=bool(name), custom=bool(name),
                      activity="Gestartet", status="running", todos=[],
-                     tasks={}, term=None, pending=None, pids=[], answered={},
+                     tasks={}, term=None, pending=None, pids=[], answered={}, bg={},
                      color=MASCOTS[self.color_i % len(MASCOTS)], updated=time.time())
             self.color_i += 1
             self.sessions[sid] = s
@@ -248,6 +249,13 @@ def apply_tasks(s, name, inp, resp):
     s["todos"] = list(s["tasks"].values())
 
 
+def bg_text(s):
+    """Background commands still running after Claude finished its answer."""
+    labels = list(s["bg"].values())
+    more = f" (+{len(labels) - 1})" if len(labels) > 1 else ""
+    return "Im Hintergrund: " + labels[-1] + more
+
+
 def mark_host(s, d):
     host = d.get("_host")
     if host and host != HOST:
@@ -323,7 +331,12 @@ def handle_event(d):
             s["status"] = "idle"
         elif ev == "UserPromptSubmit":
             p = d.get("prompt", "")
-            if not s["named"] and p.strip() and not p.strip().startswith("/"):
+            if p.lstrip().startswith("<task-notification>"):
+                # a background command ended; Claude Code reports it as a prompt
+                m = re.search(r"<task-id>([^<]+)</task-id>", p)
+                if m:
+                    s["bg"].pop(m.group(1).strip(), None)
+            if not s["named"] and p.strip() and not p.strip().startswith(("/", "<")):
                 s["title"] = f"{base(s['cwd']) or 'Session'} · {short(p, 26)}"
                 s["named"] = True
             s["activity"] = "Denkt nach…"
@@ -339,6 +352,12 @@ def handle_event(d):
             inp = d.get("tool_input") or {}
             resp = d.get("tool_response")
             apply_tasks(s, name, inp, resp)
+            if isinstance(resp, dict) and resp.get("backgroundTaskId"):
+                s["bg"][str(resp["backgroundTaskId"])] = short(
+                    inp.get("description") or inp.get("command") or name, 36)
+            if name in ("KillShell", "KillBash", "TaskStop"):
+                for k in ("shell_id", "task_id", "bash_id", "id"):
+                    s["bg"].pop(str(inp.get(k)), None)
             if name in ("Bash", "PowerShell"):
                 out = ""
                 if isinstance(resp, dict):
@@ -356,14 +375,22 @@ def handle_event(d):
                 if nt == "permission_prompt" or "permission" in msg.lower():
                     s["status"] = "permission"
                     s["activity"] = "braucht Erlaubnis (im Terminal)"
+                    beep()
+                elif s["bg"]:   # not idle: a background command is still running
+                    s["status"] = "running"
+                    s["activity"] = bg_text(s)
                 else:
                     s["status"] = "waiting"
                     s["activity"] = "wartet auf dich"
-                beep()
+                    beep()
         elif ev == "Stop":
-            s["status"] = "done"
-            s["activity"] = "Fertig"
-            beep()
+            if s["bg"]:
+                s["status"] = "running"
+                s["activity"] = bg_text(s)
+            else:
+                s["status"] = "done"
+                s["activity"] = "Fertig"
+                beep()
         ST.bump()
 
 
@@ -536,6 +563,28 @@ def ui_action(d):
     return {}
 
 
+def debug_log(path, d):
+    """With {"debug": true} in config.json every incoming event is noted in
+    events.log (troubleshooting: which hooks fire when)."""
+    try:
+        with open(os.path.join(HERE, "config.json"), encoding="utf-8") as f:
+            if not json.load(f).get("debug"):
+                return
+        p = os.path.join(HERE, "events.log")
+        if os.path.exists(p) and os.path.getsize(p) > 2_000_000:
+            return
+        resp = d.get("tool_response")
+        row = [time.strftime("%H:%M:%S"), path, str(d.get("hook_event_name")),
+               str(d.get("session_id"))[:8], str(d.get("tool_name") or ""),
+               str(d.get("notification_type") or d.get("source") or d.get("reason") or ""),
+               short(d.get("prompt") or d.get("message") or "", 160),
+               ",".join(sorted(resp)) if isinstance(resp, dict) else ""]
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(" | ".join(row) + "\n")
+    except Exception:
+        pass
+
+
 def same(a, b):
     return hmac.compare_digest(str(a).encode("utf-8"), str(b).encode("utf-8"))
 
@@ -639,6 +688,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             d = {}
         out = {}
+        if self.path != "/ui":
+            debug_log(self.path, d)
         try:
             if self.path == "/ask":
                 out = handle_ask(d, self.connection)
